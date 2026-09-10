@@ -88,7 +88,7 @@
 
     .scoreboard {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       gap: 9px;
       margin-bottom: 12px;
     }
@@ -122,7 +122,7 @@
 
     .setup {
       display: grid;
-      grid-template-columns: 1fr 1fr 1.3fr;
+      grid-template-columns: 1fr 1fr 1fr 1.3fr;
       gap: 9px;
       margin-bottom: 12px;
     }
@@ -153,6 +153,12 @@
       font: inherit;
       font-weight: 800;
       outline: none;
+    }
+
+    select option {
+      color: #edf6ff;
+      background: #101620;
+      font-weight: 700;
     }
 
     input[type="range"] { accent-color: var(--accent); cursor: pointer; }
@@ -266,6 +272,34 @@
       font-size: 12px;
     }
 
+    .sound-on { color: var(--accent); }
+
+    .guide {
+      margin-top: 14px;
+      border: 1px solid var(--panel-border);
+      border-radius: 14px;
+      background: var(--panel);
+      box-shadow: 0 10px 30px var(--shadow);
+    }
+
+    .guide summary {
+      padding: 12px 14px;
+      cursor: pointer;
+      color: var(--text);
+      font-weight: 800;
+      list-style-position: inside;
+    }
+
+    .guide-content {
+      display: grid;
+      gap: 8px;
+      padding: 0 14px 14px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .guide-content strong { color: var(--accent); }
+
     .instructions {
       margin: 0;
       color: var(--muted);
@@ -304,7 +338,7 @@
       .pad { justify-self: center; }
       .setup { grid-template-columns: 1fr 1fr; }
       .setup .setting:last-child { grid-column: 1 / -1; }
-      .scoreboard { grid-template-columns: 1fr 1fr; }
+      .scoreboard { grid-template-columns: repeat(3, 1fr); }
     }
   </style>
 </head>
@@ -323,9 +357,18 @@
       <div class="stat"><span class="stat-label">Best</span><strong class="stat-value" id="best">0</strong></div>
       <div class="stat"><span class="stat-label">Level</span><strong class="stat-value" id="level">1</strong></div>
       <div class="stat"><span class="stat-label">Speed</span><strong class="stat-value" id="speed">1.0x</strong></div>
+      <div class="stat"><span class="stat-label" id="clock-label">Mode</span><strong class="stat-value" id="clock">Classic</strong></div>
     </section>
 
     <section class="setup" aria-label="Game setup">
+      <div class="setting">
+        <label for="mode">Game type</label>
+        <select id="mode">
+          <option value="classic">Classic run</option>
+          <option value="time">Time attack · 60s</option>
+          <option value="survival">Survival · hazards</option>
+        </select>
+      </div>
       <div class="setting">
         <label for="scenario">Scenario</label>
         <select id="scenario">
@@ -368,13 +411,16 @@
     </div>
     <div class="actions">
       <button class="secondary" id="pause" type="button">Pause</button>
+      <button class="secondary" id="sound" type="button">Sound: On</button>
       <button class="secondary" id="share">Share game</button>
-      <button class="secondary" id="linkedin">Share on LinkedIn</button>
       <button class="secondary" id="install" hidden>Install on Android</button>
     </div>
     <p class="status-note" id="status-note" aria-live="polite"></p>
+    <div id="react-guide"></div>
   </main>
 
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script>
     (() => {
       const canvas = document.getElementById("game");
@@ -383,12 +429,15 @@
       const bestEl = document.getElementById("best");
       const levelEl = document.getElementById("level");
       const speedEl = document.getElementById("speed");
+      const clockLabelEl = document.getElementById("clock-label");
+      const clockEl = document.getElementById("clock");
+      const modeEl = document.getElementById("mode");
       const scenarioEl = document.getElementById("scenario");
       const speedControl = document.getElementById("speed-control");
       const speedSetting = document.getElementById("speed-setting");
       const shareButton = document.getElementById("share");
       const pauseButton = document.getElementById("pause");
-      const linkedinButton = document.getElementById("linkedin");
+      const soundButton = document.getElementById("sound");
       const installButton = document.getElementById("install");
       const statusNote = document.getElementById("status-note");
       const overlay = document.getElementById("overlay");
@@ -414,9 +463,32 @@
       let newRecord = false;
       let level = 1;
       let baseSpeed = 1;
+      let timeRemaining = 60;
+      let lastLevel = 1;
       let installPrompt;
+      let audioContext;
+      let soundEnabled = localStorage.getItem("neon-snake-sound") !== "off";
 
       bestEl.textContent = best;
+      soundButton.textContent = soundEnabled ? "Sound: On" : "Sound: Off";
+
+      function playTone(frequency, duration, type = "sine", volume = .045, slideTo) {
+        if (!soundEnabled) return;
+        audioContext ||= new (window.AudioContext || window.webkitAudioContext)();
+        if (audioContext.state === "suspended") audioContext.resume();
+        const oscillator = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        const now = audioContext.currentTime;
+        oscillator.type = type;
+        oscillator.frequency.setValueAtTime(frequency, now);
+        if (slideTo) oscillator.frequency.exponentialRampToValueAtTime(slideTo, now + duration);
+        gain.gain.setValueAtTime(volume, now);
+        gain.gain.exponentialRampToValueAtTime(.001, now + duration);
+        oscillator.connect(gain);
+        gain.connect(audioContext.destination);
+        oscillator.start(now);
+        oscillator.stop(now + duration);
+      }
 
       function randomFood() {
         let next;
@@ -437,15 +509,28 @@
         levelEl.textContent = level;
         speedEl.textContent = (initialSpeed / currentDelay()).toFixed(1) + "x";
         speedSetting.textContent = baseSpeed.toFixed(1) + "x";
+        if (modeEl.value === "time") {
+          clockLabelEl.textContent = "Time";
+          clockEl.textContent = Math.max(0, Math.ceil(timeRemaining)) + "s";
+        } else {
+          clockLabelEl.textContent = "Mode";
+          clockEl.textContent = modeEl.options[modeEl.selectedIndex].text.split(" · ")[0];
+        }
       }
 
       function buildObstacles() {
-        if (scenarioEl.value !== "maze") return [];
-        return [
+        const walls = scenarioEl.value === "maze" ? [
           { x: 5, y: 5, width: 5, height: 1 }, { x: 14, y: 5, width: 5, height: 1 },
           { x: 5, y: 18, width: 5, height: 1 }, { x: 14, y: 18, width: 5, height: 1 },
           { x: 5, y: 8, width: 1, height: 8 }, { x: 18, y: 8, width: 1, height: 8 }
-        ];
+        ] : [];
+        if (modeEl.value === "survival") {
+          walls.push(
+            { x: 3, y: 3, width: 2, height: 2 }, { x: 19, y: 3, width: 2, height: 2 },
+            { x: 3, y: 19, width: 2, height: 2 }, { x: 19, y: 19, width: 2, height: 2 }
+          );
+        }
+        return walls;
       }
 
       function isBlocked(point) {
@@ -468,6 +553,8 @@
         score = 0;
         newRecord = false;
         level = 1;
+        lastLevel = 1;
+        timeRemaining = 60;
         obstacles = buildObstacles();
         food = randomFood();
         running = true;
@@ -508,13 +595,24 @@
         const hitSelf = bodyToCheck.some(segment => segment.x === head.x && segment.y === head.y);
 
         if (hitWall || hitSelf || isBlocked(head)) {
+          playTone(150, .28, "sawtooth", .08, 55);
           endGame();
           return;
         }
 
+        if (modeEl.value === "time") {
+          timeRemaining -= currentDelay() / 1000;
+          if (timeRemaining <= 0) {
+            playTone(180, .35, "square", .07, 70);
+            endGame("Time's up. Great sprint.");
+            return;
+          }
+        }
+
         snake.unshift(head);
         if (willEat) {
-          score += 10;
+          playTone(520, .12, "sine", .06, 880);
+          score += modeEl.value === "time" ? 15 : 10;
           if (score > best) {
             best = score;
             newRecord = true;
@@ -524,16 +622,24 @@
         } else {
           snake.pop();
         }
+        if (level > lastLevel) {
+          lastLevel = level;
+          if (modeEl.value === "survival") {
+            const hazard = { x: 11 + (level % 3), y: 4 + (level % 4), width: 2, height: 2 };
+            if (!isBlocked(hazard)) obstacles.push(hazard);
+          }
+        }
         updateStats();
         draw();
         schedule();
       }
 
-      function endGame() {
+      function endGame(message) {
         running = false;
         clearTimeout(timer);
+        playTone(110, .42, "triangle", .07, 45);
         finalScore.textContent = score + (score === 1 ? " point" : " points");
-        finalMessage.textContent = newRecord ? "New personal best. Nice run." : "The grid got you this time.";
+        finalMessage.textContent = message || (newRecord ? "New personal best. Nice run." : "The grid got you this time.");
         overlay.hidden = false;
         draw();
       }
@@ -674,7 +780,14 @@
       }
 
       pauseButton.addEventListener("click", togglePause);
+      soundButton.addEventListener("click", () => {
+        soundEnabled = !soundEnabled;
+        localStorage.setItem("neon-snake-sound", soundEnabled ? "on" : "off");
+        soundButton.textContent = soundEnabled ? "Sound: On" : "Sound: Off";
+        if (soundEnabled) playTone(440, .1, "sine", .04, 660);
+      });
       scenarioEl.addEventListener("change", reset);
+      modeEl.addEventListener("change", reset);
       speedControl.addEventListener("input", () => {
         baseSpeed = Number(speedControl.value);
         updateStats();
@@ -703,15 +816,6 @@
         }
       });
 
-      linkedinButton.addEventListener("click", () => {
-        if (location.protocol === "file:") {
-          statusNote.textContent = "Publish to GitHub Pages first, then use this button to share the public link.";
-          return;
-        }
-        const linkedinUrl = "https://www.linkedin.com/sharing/share-offsite/?url=" + encodeURIComponent(location.href);
-        window.open(linkedinUrl, "_blank", "noopener,noreferrer");
-      });
-
       window.addEventListener("beforeinstallprompt", event => {
         event.preventDefault();
         installPrompt = event;
@@ -732,6 +836,58 @@
 
       if (/Android/i.test(navigator.userAgent)) installButton.hidden = false;
       reset();
+    })();
+  </script>
+  <script>
+    (() => {
+      const guideRoot = document.getElementById("react-guide");
+      const scenarioSelect = document.getElementById("scenario");
+      const modeSelect = document.getElementById("mode");
+      if (!guideRoot || !window.React || !window.ReactDOM) return;
+
+      const { createElement: h, useEffect, useState } = React;
+      const scenarios = {
+        classic: ["Classic", "Walls are dangerous. Plan turns early and build your score."],
+        wrap: ["Wrap around", "The board loops at every edge, giving you more room to escape."],
+        maze: ["Neon maze", "Blue barriers are solid. Thread through the open lanes carefully."]
+      };
+      const modes = {
+        classic: "Classic run: build the longest score you can.",
+        time: "Time attack: collect fast for 60 seconds; each orb is worth 15 points.",
+        survival: "Survival: corner hazards and new barriers appear as levels rise."
+      };
+
+      function GameGuide() {
+        const [scenario, setScenario] = useState(scenarioSelect.value);
+        const [mode, setMode] = useState(modeSelect.value);
+        const [open, setOpen] = useState(false);
+
+        useEffect(() => {
+          const update = () => setScenario(scenarioSelect.value);
+          scenarioSelect.addEventListener("change", update);
+          const updateMode = () => setMode(modeSelect.value);
+          modeSelect.addEventListener("change", updateMode);
+          return () => {
+            scenarioSelect.removeEventListener("change", update);
+            modeSelect.removeEventListener("change", updateMode);
+          };
+        }, []);
+
+        const [name, description] = scenarios[scenario];
+        return h("details", {
+          className: "guide",
+          open,
+          onToggle: event => setOpen(event.currentTarget.open)
+        }, h("summary", null, `React game guide · ${name}`),
+        h("div", { className: "guide-content" },
+          h("div", null, h("strong", null, "Game type: "), modes[mode]),
+          h("div", null, h("strong", null, `${name}: `), description),
+          h("div", null, "Collect pink energy orbs to gain 10 points. Every 50 points advances the level and increases speed."),
+          h("div", null, h("strong", null, "Tip: "), "Use P to pause when the board gets too fast.")
+        ));
+      }
+
+      ReactDOM.createRoot(guideRoot).render(h(GameGuide));
     })();
   </script>
 </body>
